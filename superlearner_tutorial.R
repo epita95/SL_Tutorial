@@ -1,14 +1,22 @@
 # ==============================================================================
 # Super Learner: A Practical Tutorial - Complete Reproducible R Code
 # ==============================================================================
-# This script contains all R code from the Overleaf article "Super Learner: 
+# This script contains all R code from the Overleaf article "Super Learner:
 # A Practical Tutorial", organized by code boxes with their original labels.
-# 
+#
 # Article: Super Learner: A Practical Tutorial
-# Repository: https://git.overleaf.com/6abe3298dba216ce9b241bf0
-# 
+# Overleaf: https://git.overleaf.com/6abe3298dba216ce9b241bf0
+# GitHub repo (code only): https://github.com/migariane/SL_Tutorial
+#   This repo keeps ONLY README.md + superlearner_tutorial.R (+ LICENSE).
+#   All LaTeX / PDF / image artefacts live in the Overleaf project.
+#
+# Synced to Overleaf commit ad15a36 (2026-10-06):
+#   "Fix LaTeX errors, broken code blocks, and mismatched output boxes"
+#   58 rcode blocks. Obsolete Box code:cvsl-nnloglik (standalone) removed;
+#   NNloglik is now demonstrated inside the clinical application.
+#
 # To replicate the tutorial:
-#   1. Install required packages (Box 1)
+#   1. Install required packages (Box code:install)
 #   2. Run sections sequentially - each box builds on previous ones
 #   3. Set seeds as shown for exact reproducibility
 # ==============================================================================
@@ -20,7 +28,7 @@
 #   "glmnet", "randomForest", "ranger", "xgboost", "earth", "gam",
 #   "gbm", "rpart", "nnet", "e1071", "ipred", "ada",
 #   "ggplot2", "ROCR", "pROC", "caret", "data.table", "mlbench",
-#   "RhpcBLASctl", "rmutil", "vcd", "nnls", "Matrix"
+#   "RhpcBLASctl", "rmutil", "vcd", "nnls", "Matrix", "tmle"
 # ))
 
 # Load required packages
@@ -51,6 +59,60 @@ library(Matrix)
 
 # Box: code:load-sl - Loading the SuperLearner package
 library(SuperLearner)
+
+
+# ==============================================================================
+# SECTION 0: THEORETICAL FOUNDATION - WEIGHTED SL PROCEDURE
+# (Overleaf Section "SL Fundamentals"; standalone illustration with
+#  simulated Z matrix. Variables n/Y here are local and redefined below.)
+# ==============================================================================
+
+# Box: code:weighted-procedure - Implementing the weighted SL procedure
+# Simulate cross-validated predictions Z (n x K matrix)
+set.seed(123)
+n <- 400
+K <- 3
+Z <- matrix(runif(n * K), nrow = n, ncol = K)
+colnames(Z) <- c("SL.glmnet", "SL.randomForest", "SL.mean")
+# Outcome vector
+Y <- rbinom(n, 1, 0.44)
+# Meta-learner: Non-negative least squares (NNLS) for convex combination
+library(nnls)
+fit_nnls <- nnls(Z, Y)
+alpha <- fit_nnls$x / sum(fit_nnls$x)  # normalize to sum to 1
+names(alpha) <- colnames(Z)
+print(round(alpha, 3))
+# Predict Candidate Learners on New Data (Test Set)
+n_new <- 50 # Number of new test observations to predict
+# Generate individual candidate predictions for new test instances
+# (In real workflows, replace these with predict(fit_model, newdata = X_new))
+psi_glmnet <- runif(n_new)
+psi_rf     <- runif(n_new)
+psi_mean   <- rep(mean(Y), n_new)
+# Combine candidate predictions into a matrix matching Z's column structure
+Z_new <- cbind(
+  SL.glmnet       = psi_glmnet,
+  SL.randomForest = psi_rf,
+  SL.mean         = psi_mean
+)
+# Final SL Ensemble Predictions
+# Option A: Explicit Manual Indexing
+# Multiplies each algorithm's prediction vector by its assigned weight by name
+psi_SL_manual <- (alpha["SL.glmnet"]       * psi_glmnet) +
+                 (alpha["SL.randomForest"] * psi_rf)     +
+                 (alpha["SL.mean"]         * psi_mean)
+# Option B: Matrix Multiplication (Vectorized / Production)
+# Computes the exact same linear combination across all rows simultaneously
+psi_SL_matrix <- drop(Z_new %*% alpha)
+# Output Results and Verify Equivalence
+# Inspect first few predictions from both methods
+results_comparison <- head(data.frame(
+  Manual_Indexing = psi_SL_manual,
+  Matrix_Product  = psi_SL_matrix
+))
+cat("--- First Few SL Predictions ---\n")
+print(results_comparison)
+cat("\n")
 
 
 # ==============================================================================
@@ -86,18 +148,15 @@ summary(dat)
 # SECTION 2: BASIC SUPER LEARNER
 # ==============================================================================
 
-# Train / test split (80% / 20%) - used throughout
+# Box: code:sl-single - Fitting SL with a single algorithm
 set.seed(123)
+
+# Train / test split (80 % / 20 %)
 train_idx <- sample(1:n, 400)
 X_train   <- dat[train_idx, 1:5]
 Y_train   <- dat[train_idx, 6]
 X_test    <- dat[-train_idx, 1:5]
 Y_test    <- dat[-train_idx, 6]
-
-
-# ---- 2.1 Single Algorithm ----
-# Box: code:sl-single - Fitting Super Learner with a single algorithm
-set.seed(123)
 
 sl_lasso <- SuperLearner(
   Y = Y_train, X = X_train,
@@ -107,14 +166,13 @@ sl_lasso <- SuperLearner(
 sl_lasso
 
 # Box: code:lasso-coef - Extracting LASSO coefficients
-# Note: fit_lasso is the internal glmnet fit from SL.glmnet
-# Access via the fit object returned by SuperLearner
-fit_lasso <- sl_lasso$fitLibrary$SL.glmnet_All$object
-round(as.matrix(coef(fit_lasso, s = "lambda.min")), 3)
+# The fitted glmnet object is stored in the fitLibrary
+lasso_fit <- sl_lasso$fitLibrary$SL.glmnet_All$object
+round(as.matrix(coef(lasso_fit, s = "lambda.min")), 3)
 
 
-# ---- 2.2 Two Algorithms ----
-# Box: code:sl-two - Fitting Super Learner with two algorithms
+# ---- Two Algorithms ----
+# Box: code:sl-two - Fitting SL with two algorithms
 set.seed(123)
 
 sl_two <- SuperLearner(
@@ -125,7 +183,7 @@ sl_two <- SuperLearner(
 sl_two
 
 
-# ---- 2.3 Full Ensemble with Reference Model ----
+# ---- Full Ensemble with Reference Model ----
 # Box: code:sl-reference - Including a reference model in the ensemble
 set.seed(123)
 sl <- SuperLearner(
@@ -144,7 +202,7 @@ sl$times$everything
 # SECTION 3: PREDICTIONS AND PERFORMANCE
 # ==============================================================================
 
-# ---- 3.1 Generating Predictions ----
+# ---- Generating Predictions ----
 # Box: code:predict - Generating predictions on the test set
 # Keep ensemble and individual learner predictions
 pred <- predict(sl, newdata = X_test, onlySL = FALSE)
@@ -159,9 +217,9 @@ head(pred$pred)
 head(pred$library.predict)
 
 
-# ---- 3.2 Manual Weighted Sum Reconstruction ----
+# ---- Manual Weighted Sum Reconstruction ----
 # Box: code:manual-prediction - Manual weighted sum reconstruction
-# Extract fitted ensemble weights from the Super Learner object
+# Extract fitted ensemble weights from the SL object
 alpha_sl <- sl$coef
 names(alpha_sl) <- c("SL.mean", "SL.glmnet", "SL.randomForest")
 print(round(alpha_sl, 4))
@@ -187,7 +245,7 @@ data.frame(
 )
 
 
-# ---- 3.3 Area Under the ROC Curve ----
+# ---- Area Under the ROC Curve ----
 # Box: code:auc - Computing the AUC on the test set
 pred_rocr <- ROCR::prediction(pred$pred, Y_test)
 
@@ -241,7 +299,7 @@ ggplot(roc_df, aes(x = FPR, y = TPR, color = Model)) +
 # SECTION 4: CROSS-VALIDATED SUPER LEARNER
 # ==============================================================================
 
-# ---- 4.1 Fitting CV.SuperLearner ----
+# ---- Fitting CV.SuperLearner ----
 # Box: code:cvsl - Fitting CV.SuperLearner
 set.seed(123)
 
@@ -258,12 +316,12 @@ system.time({
 summary(cv_sl)
 
 
-# ---- 4.2 Discrete Super Learner ----
-# Box: code:discrete-sl - Identifying the Discrete Super Learner
+# ---- Discrete Super Learner ----
+# Box: code:discrete-sl - Identifying the Discrete SL
 table(simplify2array(cv_sl$whichDiscreteSL))
 
 
-# ---- 4.3 Distribution of Ensemble Weights ----
+# ---- Distribution of Ensemble Weights ----
 # Box: code:review-weights - Distribution of ensemble weights across folds
 review_weights <- function(cv_sl) {
   meta_weights <- coef(cv_sl)              # matrix: folds x learners
@@ -282,7 +340,7 @@ print(review_weights(cv_sl), digits = 3)
 # SECTION 5: HYPERPARAMETER TUNING
 # ==============================================================================
 
-# ---- 5.1 Algorithm Variants ----
+# ---- Algorithm Variants ----
 # Box: code:rf-wrapper - Random Forest variant with custom wrapper
 SL.rf.better <- function(...) {
   SL.randomForest(..., ntree = 3000)
@@ -314,7 +372,7 @@ learners <- create.Learner(
 learners$names
 
 
-# ---- 5.2 Hyperparameter Grids ----
+# ---- Hyperparameter Grids ----
 # Box: code:mtry-default - Reference value of mtry
 floor(sqrt(ncol(X_train)))
 
@@ -350,7 +408,7 @@ cv_sl_mtry <- CV.SuperLearner(
 summary(cv_sl_mtry)
 
 
-# ---- 5.3 XGBoost Grid ----
+# ---- XGBoost Grid ----
 # Box: code:xgb-grid - Generating XGBoost hyperparameters grid
 tune_xgb <- list(
   ntrees    = c(200, 500, 1000, 2000, 5000),
@@ -372,7 +430,7 @@ cat("Number of XGBoost configurations:", length(learners_xgb$names), "\n")
 # SECTION 6: FEATURE SCREENING
 # ==============================================================================
 
-# ---- 6.1 Correlation-based Screening ----
+# ---- Correlation-based Screening ----
 # Box: code:screen-corp - Feature screening based on correlation
 set.seed(123)
 
@@ -390,7 +448,7 @@ cv_sl_screen <- CV.SuperLearner(
 summary(cv_sl_screen)
 
 
-# ---- 6.2 LASSO-based Screening ----
+# ---- LASSO-based Screening ----
 # Box: code:screen-glmnet - LASSO-based feature screening
 set.seed(123)
 
@@ -410,51 +468,28 @@ summary(cv_sl_screen2)
 
 # ==============================================================================
 # SECTION 7: OPTIMIZING FOR AUC
+# (method.NNloglik standalone box removed in Overleaf; NNloglik is now
+#  demonstrated in the clinical application with method = "method.NNloglik".)
 # ==============================================================================
 
-# ---- 7.1 AUC Optimization ----
-# Box: code:cvsl-auc - Optimizing for AUC
+# Box: code:cvsl-auc - CV.SuperLearner with method.AUC
 set.seed(123)
-
 cv_sl_auc <- CV.SuperLearner(
   Y = Y_train, X = X_train,
   family = binomial(),
   V = 5,
   method = "method.AUC",
-  SL.library = list(
-    "SL.mean",
-    "SL.glmnet",
-    c("SL.glmnet", "screen.corP")
-  )
+  SL.library = list("SL.mean", "SL.glmnet", "SL.randomForest",
+                    c("SL.glmnet", "screen.corP"))
 )
-
 summary(cv_sl_auc)
-
-
-# ---- 7.2 Negative Log-Likelihood ----
-# Box: code:cvsl-nnloglik - Optimizing for Negative Log-Likelihood
-set.seed(123)
-
-cv_sl_nnloglik <- CV.SuperLearner(
-  Y = Y_train, X = X_train,
-  family = binomial(),
-  V = 5,
-  method = "method.NNloglik",
-  SL.library = c(
-    "SL.mean",
-    "SL.glmnet",
-    "SL.randomForest"
-  )
-)
-
-summary(cv_sl_nnloglik)
 
 
 # ==============================================================================
 # SECTION 8: PARALLELIZATION
 # ==============================================================================
 
-# ---- 8.1 Multicore Execution ----
+# ---- Multicore Execution ----
 # Box: code:parallel-setup - Configuring parallel execution
 num_cores <- RhpcBLASctl::get_num_cores()
 cat("Cores available on this machine:", num_cores, "\n")
@@ -475,15 +510,12 @@ system.time({
       "SL.glmnet",
       "SL.randomForest"
     )
-  })
+  )
 })
 
-# Compare with sequential execution time (run sequentially first)
-# summary(cv_sl_par)
 
-
-# ---- 8.2 mcSuperLearner ----
-# Box: code:mcsuperlearner - Parallelized Super Learner fit
+# ---- mcSuperLearner ----
+# Box: code:mcsuperlearner - Parallelized SL fit
 set.seed(123, "L'Ecuyer-CMRG")
 
 sl_mc <- mcSuperLearner(
@@ -499,44 +531,44 @@ sl_mc <- mcSuperLearner(
 sl_mc
 
 
-# ---- 8.3 Cluster Parallel ----
+# ---- Cluster Parallel ----
 # Box: code:cluster-parallel - Parallel execution using a cluster object
-# cl <- parallel::makeCluster(4)
-# parallel::clusterExport(cl, c("Y_train", "X_train"))
-# 
-# set.seed(123)
-# 
-# cv_sl_snow <- CV.SuperLearner(
-#   Y = Y_train, X = X_train,
-#   family = binomial(),
-#   V = 10,
-#   parallel = cl,
-#   SL.library = c(
-#     "SL.mean",
-#     "SL.glmnet",
-#     "SL.randomForest"
-#   )
-# )
-# 
-# parallel::stopCluster(cl)
+cl <- parallel::makeCluster(4)
+parallel::clusterExport(cl, c("Y_train", "X_train"))
+
+set.seed(123)
+
+cv_sl_snow <- CV.SuperLearner(
+  Y = Y_train, X = X_train,
+  family = binomial(),
+  V = 10,
+  parallel = cl,
+  SL.library = c(
+    "SL.mean",
+    "SL.glmnet",
+    "SL.randomForest"
+  )
+)
+
+parallel::stopCluster(cl)
 
 
 # ==============================================================================
 # SECTION 9: CUSTOM WRAPPERS
 # ==============================================================================
 
-# ---- 9.1 Custom Learner: GBM ----
+# ---- Custom Learner: GBM ----
 # Box: code:gbm-wrapper - Custom wrapper for GBM
 SL.gbm2 <- function(Y, X, newX, family, obsWeights,
                     gbm.trees = 5000, interaction.depth = 2,
                     shrinkage = 0.001, ...) {
   form <- as.formula(paste("Y ~", paste(colnames(X), collapse = " + ")))
-  
+
   distribution <- switch(family$family,
     gaussian = "gaussian",
     binomial = "bernoulli"
   )
-  
+
   fit.gbm <- gbm::gbm(formula = form, data = X,
     distribution = distribution,
     n.trees = gbm.trees,
@@ -544,17 +576,17 @@ SL.gbm2 <- function(Y, X, newX, family, obsWeights,
     shrinkage = shrinkage,
     cv.folds = 5, keep.data = TRUE,
     weights = obsWeights, verbose = FALSE)
-  
+
   best.iter <- gbm::gbm.perf(fit.gbm, method = "cv", plot.it = FALSE)
   pred <- predict(fit.gbm, newdata = newX, best.iter, type = "response")
-  
+
   out <- list(pred = pred, fit = list(object = fit.gbm, n.trees = best.iter))
   class(out$fit) <- "SL.gbm"
   return(out)
 }
 
 
-# ---- 9.2 Custom Learner: MARS (earth) ----
+# ---- Custom Learner: MARS (earth) ----
 # Box: code:earth-wrapper - Custom wrapper for MARS
 SL.earth2 <- function(Y, X, newX, family, obsWeights, id,
                       degree = 2, penalty = 3,
@@ -574,15 +606,15 @@ SL.earth2 <- function(Y, X, newX, family, obsWeights, id,
 }
 
 
-# ---- 9.3 Custom Screener ----
+# ---- Custom Screener ----
 # Box: code:custom-screener - Custom variable screening procedure
 screen.glmnet3 <- function(Y, X, family, alpha = 1, minscreen = 2,
                            nfolds = 10, nlambda = 200, ...) {
   myfamily <- if (family$family == "binomial" && !all(Y %in% c(0, 1)))
     "gaussian" else family$family
-  
+
   if (!is.matrix(X)) X <- model.matrix(~ -1 + ., data = X)
-  
+
   fitCV <- tryCatch(
     glmnet::cv.glmnet(x = X, y = Y, lambda = NULL,
       type.measure = "deviance", nfolds = nfolds,
@@ -590,7 +622,7 @@ screen.glmnet3 <- function(Y, X, family, alpha = 1, minscreen = 2,
       nlambda = nlambda, keep = TRUE),
     error = function(e) NULL
   )
-  
+
   whichVariable <- NULL
   if (!is.null(fitCV)) {
     si <- abs((max(fitCV$nzero) - ncol(X) / 2) - fitCV$nzero)
@@ -618,7 +650,7 @@ screen.cramersv <- function(Y, X, nscreen = 6, cts.num = 10, ...) {
 }
 
 
-# ---- 9.4 Incorporating Custom Wrappers ----
+# ---- Incorporating Custom Wrappers ----
 # Box: code:cvsl-custom - Evaluating custom wrappers
 set.seed(123)
 
@@ -631,47 +663,269 @@ summary(cv_sl_custom)
 
 
 # ==============================================================================
-# SECTION 10: THEORETICAL FOUNDATION - NNLS META-LEARNER
+# SECTION 10: FULL EPIDEMIOLOGICAL APPLICATION (1000-patient CVD cohort)
 # ==============================================================================
 
-# Box: code:weighted-procedure - Implementing the weighted cross-validated 
-# Super Learner procedure (illustrative with simulated Z matrix)
+# Box: code:clinical-cohort - Simulating the clinical cohort
+set.seed(2024)
+n_clinical <- 1000
+
+age         <- rnorm(n_clinical, 65, 10)
+bmi         <- rnorm(n_clinical, 28, 5)
+sbp         <- rnorm(n_clinical, 140, 20)
+dbp         <- rnorm(n_clinical, 85, 12)
+cholesterol <- rnorm(n_clinical, 220, 40)
+glucose     <- rnorm(n_clinical, 110, 30)
+smoking     <- rbinom(n_clinical, 1, 0.25)
+diabetes    <- rbinom(n_clinical, 1, plogis(-3 + 0.1 * (bmi - 28) + 0.01 * (glucose - 110)))
+family_hx   <- rbinom(n_clinical, 1, 0.30)
+
+# Standardised predictors for stable estimation
+stand <- function(x) (x - mean(x)) / sd(x)
+
+logit_cvd <- -2.2 +
+  0.5 * stand(age) + 0.4 * stand(bmi) + 0.3 * stand(sbp) +
+  0.2 * stand(cholesterol) + 0.25 * stand(glucose) +
+  0.6 * smoking + 0.5 * diabetes + 0.4 * family_hx +
+  0.7 * stand(age) * smoking + 0.3 * stand(sbp) * stand(cholesterol) -
+  0.2 * stand(age)^2
+
+Y_cvd <- rbinom(n_clinical, 1, plogis(logit_cvd))
+cat("CVD prevalence:", round(mean(Y_cvd), 3), "\n")
+
+# Box: code:clinical-data - Organizing the simulated clinical data
+clinical_data <- data.frame(age, bmi, sbp, dbp, cholesterol, glucose,
+  smoking, diabetes, family_hx, Y = Y_cvd)
+
+# Box: code:clinical-library - Training-test split and candidate library specification
+set.seed(42)
+idx <- sample(1:n_clinical, 700)
+X_clin_train <- clinical_data[idx, 1:9]
+Y_clin_train <- clinical_data[idx, 10]
+X_clin_test  <- clinical_data[-idx, 1:9]
+Y_clin_test  <- clinical_data[-idx, 10]
+
+# Core library
+sl_library <- c(
+  "SL.mean", "SL.glm", "SL.glmnet", "SL.randomForest", "SL.ranger",
+  "SL.earth", "SL.xgboost", "SL.rpartPrune", "SL.nnet"
+)
+
+# Hyperparameter variants
+mtry_vals    <- floor(sqrt(ncol(X_clin_train)) * c(0.5, 1, 2))
+rf_learners  <- create.Learner("SL.randomForest", tune = list(mtry = mtry_vals))
+
+xgb_tune     <- list(ntrees = c(500, 1000),
+  max_depth = 3:4,
+  shrinkage = c(0.01, 0.1))
+xgb_learners <- create.Learner("SL.xgboost", tune = xgb_tune,
+  detailed_names = TRUE, name_prefix = "xgb")
+
+full_library <- c(sl_library, rf_learners$names, xgb_learners$names)
+cat("Total number of candidate learners:", length(full_library), "\n")
+
+# Box: code:clinical-cv - Cross-validated evaluation of the candidate library
+set.seed(42, "L'Ecuyer-CMRG")
+options(mc.cores = RhpcBLASctl::get_num_cores())
+
+system.time({
+  cv_sl_clinical <- CV.SuperLearner(
+    Y = Y_clin_train, X = X_clin_train,
+    family = binomial(),
+    method = "method.NNloglik",
+    parallel = "multicore",
+    cvControl = list(V = 10, stratifyCV = TRUE),
+    SL.library = full_library
+  )
+})
+
+# Box: code:clinical-cv-summary - Summarizing cross-validated performance
+summary(cv_sl_clinical)
+
+# Box: code:clinical-weights - Examining ensemble weights across CV folds
+print(review_weights(cv_sl_clinical), digits = 3)
+
+# Box: code:clinical-evaluation - Evaluating the final SL model on the test set
+set.seed(42)
+
+sl_clinical_full <- SuperLearner(
+  Y = Y_clin_train, X = X_clin_train,
+  family = binomial(), method = "method.NNloglik",
+  SL.library = full_library
+)
+
+pred_clinical <- predict(sl_clinical_full, X_clin_test, onlySL = TRUE)
+
+roc_test <- pROC::roc(Y_clin_test, pred_clinical$pred, quiet = TRUE)
+cat("Test AUC:", round(as.numeric(pROC::auc(roc_test)), 4), "\n")
+cat("95% CI :", round(as.numeric(pROC::ci.auc(roc_test)), 4), "\n")
+
+# Box: code:clinical-roc - Plotting the ROC curve on the independent test set
+plot(roc_test,
+  main = "SL on the 30% held-out test set",
+  print.auc = TRUE, print.auc.y = 0.4,
+  col = "#2ECC71", lwd = 3)
+abline(a = 0, b = 1, lty = 2, col = "gray50")
+
+# Box: code:clinical-calibration - Assessing calibration on the independent test set
+cal_df <- data.frame(predicted = as.vector(pred_clinical$pred),
+  observed  = Y_clin_test)
+
+cal_bins <- cut(cal_df$predicted, breaks = 10)
+cal_sum  <- aggregate(cbind(predicted, observed) ~ cal_bins,
+  data = cal_df, FUN = mean)
+
+ggplot(cal_sum, aes(x = predicted, y = observed)) +
+  geom_point(size = 3, color = "#2ECC71") +
+  geom_smooth(method = "loess", se = FALSE, color = "#E74C3C") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed",
+    color = "gray50") +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(x = "Predicted probability", y = "Observed proportion") +
+  theme_minimal(base_size = 14)
+
+
+# ==============================================================================
+# SECTION 11: CONTINUOUS OUTCOMES
+# ==============================================================================
+
+# Box: code:continuous-data - Generating data with a continuous outcome
+set.seed(99)
+
+n_reg <- 500
+
+X_reg <- data.frame(
+  x1 = rnorm(n_reg),
+  x2 = rnorm(n_reg),
+  x3 = rnorm(n_reg)
+)
+
+Y_reg <- with(
+  X_reg,
+  3 + 2 * x1 + x1^2 - 1.5 * x2 * x3 +
+    rnorm(n_reg, 0, 0.5)
+)
+
+# Box: code:continuous-sl - Fitting SL with a continuous outcome
+set.seed(99)
+sl_reg <- SuperLearner(
+  Y = Y_reg,
+  X = X_reg,
+  family = gaussian(),
+  SL.library = c("SL.mean", "SL.glm", "SL.glmnet", "SL.randomForest", "SL.earth"))
+sl_reg
+
+# Box: code:continuous-error - Evaluating prediction error
+pred_reg <- predict(sl_reg, X_reg)
+mse <- mean((Y_reg - pred_reg$pred)^2)
+cat("MSE :", round(mse, 4), "\n")
+cat("RMSE:", round(sqrt(mse), 4), "\n")
+
+
+# ==============================================================================
+# SECTION 12: DOSE-RESPONSE ESTIMATION
+# ==============================================================================
+
+# Box: code:dose-response - Data generation and true curve
+set.seed(12345)
+n_dose <- 1000
+x_dose <- runif(n_dose, 0, 8)
+# True dose-response: sqrt branch below 2, quadratic branch above 2
+y_dose <- 5 + 4 * sqrt(9 * x_dose) * as.numeric(x_dose < 2) +
+  as.numeric(x_dose >= 2) * (abs(x_dose - 6)^2) + rlaplace(n_dose)
+D_dose <- data.frame(x = x_dose, y = y_dose)
+# The true curve, to compare against
+xl <- seq(0, 8, 0.1)
+yl <- 5 + 4 * sqrt(9 * xl) * as.numeric(xl < 2) +
+  as.numeric(xl >= 2) * (abs(xl - 6)^2)
+truth_df <- data.frame(x = xl, y = yl)
+
+# Box: code:dose-sl-fit - Super Learner fit for dose-response
 set.seed(123)
-n <- 400
-K <- 3
-Z <- matrix(runif(n * K), nrow = n, ncol = K)
-colnames(Z) <- c("SL.glmnet", "SL.randomForest", "SL.mean")
+sl_dose <- SuperLearner(
+  Y = D_dose$y, X = data.frame(x = D_dose$x),
+  family = gaussian(),
+  method = "method.NNLS",
+  SL.library = c("SL.mean", "SL.glm", "SL.gam", "SL.earth")
+)
+sl_dose
 
-# Outcome vector
-Y <- rbinom(n, 1, 0.44)
+# Box: code:dose-predict - Predict on fine grid
+# Predict along a fine grid of "doses".
+# onlySL = FALSE so library.predict keeps the genuine curve of every
+# learner (with TRUE, zero-weight learners would be returned as 0)
+pred_dose <- predict(sl_dose, data.frame(x = xl), onlySL = FALSE)
 
-# Meta-learner: Non-negative least squares (NNLS) for convex combination
-library(nnls)
-fit_nnls <- nnls(Z, Y)
-alpha <- fit_nnls$x / sum(fit_nnls$x)  # normalize to sum to 1
-names(alpha) <- colnames(Z)
+# Box: code:dose-response-plot - Dose-response curve plot
+# Column order matches SL.library: 1 = mean, 2 = glm, 3 = gam, 4 = earth
+dose_df <- rbind(
+  data.frame(x = xl, y = truth_df$y,                    Model = "Truth"),
+  data.frame(x = xl, y = pred_dose$pred,                Model = "SuperLearner"),
+  data.frame(x = xl, y = pred_dose$library.predict[, 2], Model = "glm"),
+  data.frame(x = xl, y = pred_dose$library.predict[, 3], Model = "gam")
+)
 
-# Final Super Learner prediction on new data
-# (each candidate refitted on full data)
-# Note: This requires sl_glmnet_full, sl_rf_full, X_new defined elsewhere
-# psi_glmnet <- predict(sl_glmnet_full, newx = as.matrix(X_new), type = "response", s = "lambda.min")
-# psi_rf     <- predict(sl_rf_full, newdata = X_new, type = "prob")[, 2]
-# psi_mean   <- rep(mean(Y_train), nrow(X_new))
-# 
-# # Weighted ensemble prediction
-# psi_SL <- alpha["SL.glmnet"] * psi_glmnet + 
-#           alpha["SL.randomForest"] * psi_rf + 
-#           alpha["SL.mean"] * psi_mean
+ggplot() +
+  geom_point(data = D_dose, aes(x, y),
+    color = "gray75", alpha = 0.3, size = 0.6) +
+  geom_line(data = dose_df, aes(x, y, color = Model), size = 1.1) +
+  scale_color_manual(values = c(Truth = "black", SuperLearner = "#E74C3C",
+    glm = "#3498DB", gam = "#2ECC71")) +
+  labs(x = "Exposure (dose)", y = "Outcome") +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = c(0.8, 0.75))
 
-# Print NNLS weights
-print(round(alpha, 3))
+
+# ==============================================================================
+# SECTION 13: BEST PRACTICES (summary templates)
+# ==============================================================================
+
+# Box: code:best-practice-tune - Hyperparameter grids for key algorithms
+rf_learners_bp <- create.Learner("SL.randomForest",
+  tune = list(mtry = c(3, 5, 7)))
+xgb_learners_bp <- create.Learner("SL.xgboost", tune = list(
+  ntrees = c(500, 1000), max_depth = 3:4, shrinkage = c(0.01, 0.1)
+))
+
+# Box: code:best-practice-screen - Feature screening with learner-screener pairs
+SL.library_bp <- list(
+  "SL.glmnet",
+  c("SL.glmnet", "screen.corP"),
+  c("SL.randomForest", "screen.corRank")
+)
+
+# Box: code:best-practice-parallel - Parallel computing setup
+options(mc.cores = RhpcBLASctl::get_num_cores())
+set.seed(1, "L'Ecuyer-CMRG")   # reproducibility across cores
+
+
+# ==============================================================================
+# SECTION 14: BRIDGE TO CAUSAL INFERENCE (TMLE)
+# NOTE: supply your own Y (outcome), A (treatment), W (covariates).
+# install.packages("tmle") if needed.
+# ==============================================================================
+
+# Box: code:tmle-connection - TMLE with SuperLearner
+library(tmle)
+
+tmle_fit <- tmle(
+  Y = Y, A = A, W = W,
+  Q.SL.library = c("SL.glm", "SL.glmnet", "SL.randomForest", "SL.xgboost"),
+  g.SL.library = c("SL.glm", "SL.glmnet"),
+  cvControl = list(V = 5)
+)
 
 
 # ==============================================================================
 # END OF SCRIPT
 # ==============================================================================
-# This script reproduces all computational steps from the article:
+# This script reproduces all 58 code boxes from the Overleaf article:
 # "Super Learner: A Practical Tutorial"
-# 
+#
+# Sections: Fundamentals (NNLS) / Simulated data / Basic SL / Predictions /
+# CV.SL / Tuning / Screening / AUC / Parallel / Custom wrappers /
+# Clinical application (CVD, n=1000) / Continuous outcomes /
+# Dose-response / Best practices / TMLE bridge.
+#
 # For questions or issues, refer to the original Overleaf project.
 # ==============================================================================
